@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Build directories
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+
+# JUCE / IDE-specific
+*.xcworkspace
+*.xcodeproj
+*.sln
+*.vcxproj
+*.vcxproj.filters
+
+# Compiled objects / binaries
+*.o
+*.obj
+*.pdb
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+*.dylib
+*.app
+*.vst3
+*.component
+
+# CLion / VSCode / misc
+.idea/
+.vscode/
