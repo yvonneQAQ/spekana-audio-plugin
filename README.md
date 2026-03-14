@@ -8,15 +8,7 @@ One of its main intentions is to transform textured sound into usable MIDI mater
 
 ## Interface
 
-Add a main UI screenshot at:
-
-`docs/spekana-ui.png`
-
-Once that file is present in the repo, this image block will render on GitHub and in most markdown viewers:
-
-```md
-![SPEKANA main interface](docs/spekana-ui.png)
-```
+![SPEKANA main interface](./docs/spekana-ui.png)
 
 ## What It Does
 
