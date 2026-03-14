@@ -109,21 +109,23 @@ This project uses CMake + JUCE.
 Example build:
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DJUCE_SOURCE_DIR=/path/to/JUCE
 cmake --build build --target SPEKANA_VST3
 ```
 
-Current CMake configuration:
+If JUCE is vendored into a local `JUCE/` folder, the `-DJUCE_SOURCE_DIR=...` option can be omitted.
 
-- JUCE is added from `/Users/yifengyuan/desktop/juce`
+Current configuration:
+
+- JUCE is loaded from `JUCE_SOURCE_DIR` or from a local `JUCE/` directory
 - plugin formats currently include `AU`, `VST3`, and `Standalone`
 - MIDI output is enabled
 
 Main files:
 
-- [CMakeLists.txt](/Users/yifengyuan/Documents/SPEKANA/CMakeLists.txt)
-- [PluginProcessor.cpp](/Users/yifengyuan/Documents/SPEKANA/PluginProcessor.cpp)
-- [PluginEditor.cpp](/Users/yifengyuan/Documents/SPEKANA/PluginEditor.cpp)
+- [CMakeLists.txt](CMakeLists.txt)
+- [PluginProcessor.cpp](PluginProcessor.cpp)
+- [PluginEditor.cpp](PluginEditor.cpp)
 
 ## Install on macOS
 
