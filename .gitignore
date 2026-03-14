@@ -31,3 +31,9 @@
 # CLion / VSCode / misc
 .idea/
 .vscode/
+
+# Local experiments / generated files
+/output.mid
+/savedstuff
+/savedstuff/
+/AudioPluginPeaks.txt

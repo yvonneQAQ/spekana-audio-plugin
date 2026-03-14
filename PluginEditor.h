@@ -28,7 +28,6 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     static constexpr int kNumNoisyPeaks = AudioPluginAudioProcessor::kNumNoisyPeaks;
-    void writePeaksToTextFile (const std::array<float, kNumNoisyPeaks>& freqsHz); 
 
 private:
     bool useQuarterToneMode() const;

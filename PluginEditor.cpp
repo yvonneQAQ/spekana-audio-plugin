@@ -55,10 +55,17 @@ namespace
 
         attemptedLoad = true;
 
+        const auto executableFile = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        const auto executableDir = executableFile.getParentDirectory();
+        const auto workingDir = juce::File::getCurrentWorkingDirectory();
         const juce::File candidateFiles[] =
         {
-            juce::File ("/Users/yifengyuan/Documents/SPEKANA/Assets/Bravura.otf"),
-            juce::File ("/Users/yifengyuan/Documents/SPEKANA/Assets/BravuraText.otf"),
+            executableDir.getChildFile ("Assets").getChildFile ("Bravura.otf"),
+            executableDir.getChildFile ("Assets").getChildFile ("BravuraText.otf"),
+            executableDir.getSiblingFile ("Resources").getChildFile ("Assets").getChildFile ("Bravura.otf"),
+            executableDir.getSiblingFile ("Resources").getChildFile ("Assets").getChildFile ("BravuraText.otf"),
+            workingDir.getChildFile ("Assets").getChildFile ("Bravura.otf"),
+            workingDir.getChildFile ("Assets").getChildFile ("BravuraText.otf"),
             juce::File ("/System/Library/Fonts/Apple Symbols.ttf"),
             juce::File ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
             juce::File ("/Library/Fonts/Arial Unicode.ttf")
@@ -888,8 +895,6 @@ freezeButton.onClick = [this]()
 
     pendingFreezeMarker = true;
     pushSpectrumToImage();
-
-    writePeaksToTextFile (topFreqsForDrawing);
     captureFrozenChord();
 
     repaint();
@@ -1405,53 +1410,4 @@ void AudioPluginAudioProcessorEditor::timerCallback()
     pushSpectrumToImage();
 
     repaint();
-}
-
-
-void AudioPluginAudioProcessorEditor::writePeaksToTextFile
-    (const std::array<float, kNumNoisyPeaks>& freqsHz)
-{
-    // 保存到 用户文档目录 / AudioPluginPeaks.txt
-    auto file = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
-                    .getChildFile ("AudioPluginPeaks.txt");
-
-    // 确保文件存在
-    if (! file.existsAsFile())
-        file.create();   // 创建空文件
-
-    std::unique_ptr<juce::FileOutputStream> out (file.createOutputStream());
-    if (out == nullptr || (! out->openedOk()))
-        return; // 打不开就算了
-
-    // 追加写入：移动到文件末尾
-    out->setPosition (file.getSize());
-
-    // 时间戳
-    auto nowString = juce::Time::getCurrentTime().toString (true, true); // 日期+时间
-
-    juce::String line;
-    line << nowString << "  |  ";
-    line << (useQuarterToneMode() ? "[24-TET]  " : "[12-TET]  ");
-
-    // 把 10 个 peak 写进去（显示 pitch + Hz）
-    for (int i = 0; i < kNumNoisyPeaks; ++i)
-    {
-        float f = freqsHz[(size_t) i];
-
-        if (f > 0.0f)
-        {
-            auto noteName = freqToPitchName (f, useQuarterToneMode());
-            line << (i + 1) << ": " << noteName
-                 << " (" << juce::String (f, 1) << " Hz),  ";
-        }
-        else
-        {
-            line << (i + 1) << ": -,  ";
-        }
-    }
-
-    line << "\n";
-
-    out->writeText (line, false, false, "\n");  // 不自动加 BOM，不转行尾
-    out->flush();
 }
