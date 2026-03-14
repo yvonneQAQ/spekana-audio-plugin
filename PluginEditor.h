@@ -2,9 +2,21 @@
 
 #include "PluginProcessor.h"
 #include <array>
+#include <memory>
+#include <vector>
 
 
 class AudioPluginAudioProcessor;
+class FrozenChordStaffComponent;
+
+struct FrozenChordSnapshot
+{
+    std::array<float, AudioPluginAudioProcessor::kNumNoisyPeaks> freqsHz {};
+    juce::String label;
+    bool useQuarterToneMode = false;
+    double startTimeSeconds = 0.0;
+    double endTimeSeconds = 0.25;
+};
 //==============================================================================
 class AudioPluginAudioProcessorEditor  : public juce::AudioProcessorEditor,
                                          public juce::Timer       // ⭐ 一定要继承 Timer
@@ -15,11 +27,19 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
-    std::unique_ptr<juce::FileChooser> fileChooser;
     static constexpr int kNumNoisyPeaks = AudioPluginAudioProcessor::kNumNoisyPeaks;
     void writePeaksToTextFile (const std::array<float, kNumNoisyPeaks>& freqsHz); 
 
 private:
+    bool useQuarterToneMode() const;
+    void refreshBassBoostButtonText();
+    void captureFrozenChord();
+    void refreshStaffComponent();
+    void refreshExportButtonState();
+    void showTransientStatusMessage (juce::String message, double seconds = 2.5);
+    void resetFrozenState();
+    void closeActiveFrozenChord();
+    void clearSpectrogramImage();
 
     void timerCallback() override;      // ⭐ Timer 回调
     void pushSpectrumToImage(); 
@@ -47,16 +67,23 @@ private:
     juce::Image spectrogramImage { juce::Image::RGB, 400, 300, true };
     
     bool isFrozen = false;
-        // 用来在 UI 里显示的 10 个频率
-    std::array<float, kNumNoisyPeaks> scopeFrequencies {};
-        // ⭐ 新增：冻结状态 + 按钮
     juce::TextButton freezeButton { "Freeze" };
-    juce::TextButton releaseButton { "Release" };
-    juce::TextButton loadFileButton { "Load File" };
-    juce::TextButton playButton     { "Play" };
-    juce::TextButton micButton      { "Mic" }; 
-    
-    
+    juce::TextButton unfreezeButton { "Unfreeze" };
+    juce::TextButton resetButton { "Reset" };
+    juce::TextButton bassBoostButton { "Bass Boost" };
+    juce::TextButton quarterToneButton { "Quarter-Tone" };
+    juce::TextButton exportMidiButton { "Export MIDI" };
+    std::unique_ptr<juce::FileChooser> exportMidiChooser;
+    std::unique_ptr<juce::LookAndFeel_V4> lookAndFeel;
+
+    std::vector<FrozenChordSnapshot> frozenChords;
+    std::unique_ptr<FrozenChordStaffComponent> staffComponent;
+    int freezeCaptureCount = 0;
+    double activeFreezeSessionStartWallTimeSeconds = 0.0;
+    double activeFreezeSessionOffsetSeconds = 0.0;
+    bool pendingFreezeMarker = false;
+    juce::String transientStatusMessage;
+    double transientStatusMessageExpirySeconds = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessorEditor)
 };

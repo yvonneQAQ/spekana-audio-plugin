@@ -1,11 +1,8 @@
 #pragma once
 #include <juce_dsp/juce_dsp.h>
 #include <array>
-
-#include <juce_audio_processors/juce_audio_processors.h>
-#include <juce_audio_utils/juce_audio_utils.h>   // ⭐ 必须：AudioFormatManager, TransportSource
-
-
+#include <atomic>
+#include <vector>
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -40,16 +37,6 @@ public:
     double getTailLengthSeconds() const override;
 
 
-    void loadFile (const juce::File& file);
-    void startFilePlayback();
-    void stopFilePlayback();
-    bool isFilePlaying() const { return transportSource.isPlaying(); }
-    void setUseFileInput (bool shouldUse) { useFileInput = shouldUse; }
-    bool getUseFileInput () const { return useFileInput; }
-    void useMicrophoneInput() noexcept
-    {
-        useFileInput = false;
-    }
     //==============================================================================
     int getNumPrograms() override;
     int getCurrentProgram() override;
@@ -70,6 +57,7 @@ juce::SpinLock peakLock;
     // ==== FFT config ====
 static constexpr int kFftOrder = 11;                  // 2^11 = 2048
 static constexpr int kFftSize  = 1 << kFftOrder;  
+static constexpr int kFftHopSize = kFftSize / 4;
 static constexpr int kNumNoisyPeaks = 10;
 static constexpr int kNumEnvBands   = 60;   // envelope 的频带数量（可调整）    // 2048
 
@@ -121,6 +109,10 @@ double currentSampleRate = 44100.0;
 // 在 AudioPluginAudioProcessor.h 里 public 区加：
 void getSpectrumCopy (std::array<float, kFftSize / 2>& dest) const;
 void getTopPeaksCopy (std::array<float, kNumNoisyPeaks>& freqs, std::array<float, kNumNoisyPeaks>& mags) const;
+void setLiveFrozenMidiChord (const std::array<float, kNumNoisyPeaks>& freqsHz, bool useQuarterToneMode);
+void clearLiveFrozenMidiChord();
+void setBassBoostMode (bool shouldUseBassBoost);
+bool getBassBoostMode() const;
 
 // 小工具函数
 void pushSample (float s);
@@ -128,13 +120,22 @@ void runFftAndFindPeaks();
 void logTopFrequencies() const;
 void updateEnvelopeAndNoisyPeaks();
 
+    struct LiveMidiNote
+    {
+        int channel = 1;
+        int midiNote = -1;
+        int pitchWheelValue = 8192;
+    };
 
 private:
-    juce::AudioFormatManager formatManager;
-    std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
-    juce::AudioTransportSource transportSource;
+    void applyPendingMidiOutputChanges (juce::MidiBuffer& midiMessages);
 
-    bool useFileInput = false;  // true 时用文件作为输入分析
+    juce::SpinLock liveMidiLock;
+    std::vector<LiveMidiNote> pendingLiveMidiNotes;
+    std::vector<LiveMidiNote> activeLiveMidiNotes;
+    bool pendingLiveMidiUpdate = false;
+    std::atomic<bool> bassBoostMode { false };
+
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)
 };

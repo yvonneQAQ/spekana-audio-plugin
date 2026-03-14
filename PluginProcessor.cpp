@@ -2,9 +2,104 @@
 #include "PluginEditor.h"
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
+namespace
+{
+    constexpr int kPitchBendCentre = 8192;
+    constexpr int kPitchBendMax = 16383;
+    constexpr int kPitchBendRangeSemitones = 1;
+    constexpr int kMidiVelocity = 96;
 
+    struct QuantisedMidiPitch
+    {
+        bool valid = false;
+        int midiNote = -1;
+        int pitchWheelValue = kPitchBendCentre;
+    };
+
+    struct QuarterToneMidiClass
+    {
+        int semitoneWithinOctave = 0;
+        float bendSemitones = 0.0f;
+    };
+
+    constexpr QuarterToneMidiClass kQuarterToneMidiClasses[24] =
+    {
+        { 0,  0.0f }, { 0,  0.5f }, { 1,  0.0f }, { 2, -0.5f },
+        { 2,  0.0f }, { 2,  0.5f }, { 3,  0.0f }, { 4, -0.5f },
+        { 4,  0.0f }, { 4,  0.5f }, { 5,  0.0f }, { 5,  0.5f },
+        { 6,  0.0f }, { 7, -0.5f }, { 7,  0.0f }, { 7,  0.5f },
+        { 8,  0.0f }, { 9, -0.5f }, { 9,  0.0f }, { 9,  0.5f },
+        { 10, 0.0f }, { 11, -0.5f }, { 11, 0.0f }, { 11, 0.5f }
+    };
+
+    int pitchWheelValueForSemitoneOffset (float semitoneOffset)
+    {
+        const auto value = (int) std::round ((double) kPitchBendCentre
+                                             + (double) semitoneOffset
+                                               * (double) kPitchBendCentre
+                                               / (double) kPitchBendRangeSemitones);
+        return juce::jlimit (0, kPitchBendMax, value);
+    }
+
+    QuantisedMidiPitch quantiseFrequencyToMidiPitch (float freqHz, bool useQuarterToneMode)
+    {
+        if (freqHz <= 0.0f)
+            return {};
+
+        if (useQuarterToneMode)
+        {
+            const float quarterToneIndexFloat = 138.0f + 24.0f * std::log2 (freqHz / 440.0f);
+            const int quarterToneIndex = (int) std::round (quarterToneIndexFloat);
+
+            if (quarterToneIndex < 0 || quarterToneIndex > 255)
+                return {};
+
+            const int pitchClass = quarterToneIndex % 24;
+            const int octave     = quarterToneIndex / 24 - 1;
+            const auto pitch     = kQuarterToneMidiClasses[pitchClass];
+            const int midiNote   = 12 * (octave + 1) + pitch.semitoneWithinOctave;
+
+            if (! juce::isPositiveAndBelow (midiNote, 128))
+                return {};
+
+            return { true, midiNote, pitchWheelValueForSemitoneOffset (pitch.bendSemitones) };
+        }
+
+        const float midiFloat = 69.0f + 12.0f * std::log2 (freqHz / 440.0f);
+        const int midiNote = (int) std::round (midiFloat);
+
+        if (! juce::isPositiveAndBelow (midiNote, 128))
+            return {};
+
+        return { true, midiNote, kPitchBendCentre };
+    }
+
+    bool containsLiveMidiNote (const std::vector<AudioPluginAudioProcessor::LiveMidiNote>& notes,
+                               int midiNote,
+                               int pitchWheelValue)
+    {
+        return std::any_of (notes.begin(), notes.end(),
+                            [midiNote, pitchWheelValue] (const auto& note)
+                            {
+                                return note.midiNote == midiNote
+                                    && note.pitchWheelValue == pitchWheelValue;
+                            });
+    }
+
+    void appendPitchBendRangeSetup (juce::MidiBuffer& midiMessages, int channel, int sampleOffset)
+    {
+        midiMessages.addEvent (juce::MidiMessage::controllerEvent (channel, 101, 0), sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::controllerEvent (channel, 100, 0), sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::controllerEvent (channel, 6, kPitchBendRangeSemitones), sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::controllerEvent (channel, 38, 0), sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::controllerEvent (channel, 101, 127), sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::controllerEvent (channel, 100, 127), sampleOffset);
+    }
+
+}
 
 //==============================================================================
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
@@ -17,7 +112,6 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
                      #endif
                        )
 {
-    formatManager.registerBasicFormats(); // ⭐ 支持 wav, aiff, mp3 等等
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
@@ -90,39 +184,6 @@ void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String
 }
 
 
-void AudioPluginAudioProcessor::loadFile (const juce::File& file)
-{
-    stopFilePlayback();
-    useFileInput = false;
-
-    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
-
-    if (reader.get() != nullptr)
-    {
-        auto newSource = std::make_unique<juce::AudioFormatReaderSource> (reader.release(), true);
-
-        transportSource.setSource (newSource.get(),
-                                   0,                    // read ahead buffer
-                                   nullptr,              // thread
-                                   currentSampleRate);
-
-        readerSource = std::move (newSource);
-        useFileInput = true;   // ✅ 选中文件作为输入
-    }
-}
-
-void AudioPluginAudioProcessor::startFilePlayback()
-{
-    if (useFileInput && readerSource != nullptr)
-        transportSource.setPosition (0.0);
-        transportSource.start();
-}
-
-void AudioPluginAudioProcessor::stopFilePlayback()
-{
-    transportSource.stop();
-}
-
 // 在 AudioPluginAudioProcessor.cpp 里实现：
 void AudioPluginAudioProcessor::getSpectrumCopy (std::array<float, kFftSize / 2>& dest) const
 {
@@ -139,6 +200,90 @@ void AudioPluginAudioProcessor::getTopPeaksCopy (std::array<float, kNumNoisyPeak
     {
         freqsHz[(size_t) i]       = topFrequenciesHz[(size_t) i];   // runFftAndFindPeaks 填的 noisy peaks 频率
         residualDbOut[(size_t) i] = topMagnitudes[(size_t) i];      // “高出 envelope 的 dB”
+    }
+}
+
+void AudioPluginAudioProcessor::setLiveFrozenMidiChord (const std::array<float, kNumNoisyPeaks>& freqsHz,
+                                                        bool useQuarterToneMode)
+{
+    std::vector<LiveMidiNote> nextNotes;
+    nextNotes.reserve (kNumNoisyPeaks);
+
+    int nextQuarterToneChannel = 1;
+
+    for (float freqHz : freqsHz)
+    {
+        const auto pitch = quantiseFrequencyToMidiPitch (freqHz, useQuarterToneMode);
+        if (! pitch.valid)
+            continue;
+
+        if (containsLiveMidiNote (nextNotes, pitch.midiNote, pitch.pitchWheelValue))
+            continue;
+
+        LiveMidiNote liveNote;
+        liveNote.channel = useQuarterToneMode ? nextQuarterToneChannel++ : 1;
+        liveNote.midiNote = pitch.midiNote;
+        liveNote.pitchWheelValue = pitch.pitchWheelValue;
+        nextNotes.push_back (liveNote);
+
+        if (useQuarterToneMode && nextQuarterToneChannel > 16)
+            break;
+    }
+
+    const juce::SpinLock::ScopedLockType lock (liveMidiLock);
+    pendingLiveMidiNotes = std::move (nextNotes);
+    pendingLiveMidiUpdate = true;
+}
+
+void AudioPluginAudioProcessor::clearLiveFrozenMidiChord()
+{
+    const juce::SpinLock::ScopedLockType lock (liveMidiLock);
+    pendingLiveMidiNotes.clear();
+    pendingLiveMidiUpdate = true;
+}
+
+void AudioPluginAudioProcessor::setBassBoostMode (bool shouldUseBassBoost)
+{
+    bassBoostMode.store (shouldUseBassBoost);
+}
+
+bool AudioPluginAudioProcessor::getBassBoostMode() const
+{
+    return bassBoostMode.load();
+}
+
+void AudioPluginAudioProcessor::applyPendingMidiOutputChanges (juce::MidiBuffer& midiMessages)
+{
+    std::vector<LiveMidiNote> nextNotes;
+
+    {
+        const juce::SpinLock::ScopedLockType lock (liveMidiLock);
+
+        if (! pendingLiveMidiUpdate)
+            return;
+
+        nextNotes = pendingLiveMidiNotes;
+        pendingLiveMidiUpdate = false;
+    }
+
+    constexpr int sampleOffset = 0;
+
+    for (const auto& note : activeLiveMidiNotes)
+    {
+        midiMessages.addEvent (juce::MidiMessage::noteOff (note.channel, note.midiNote), sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::pitchWheel (note.channel, kPitchBendCentre), sampleOffset);
+    }
+
+    activeLiveMidiNotes = nextNotes;
+
+    for (const auto& note : activeLiveMidiNotes)
+    {
+        appendPitchBendRangeSetup (midiMessages, note.channel, sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::pitchWheel (note.channel, note.pitchWheelValue), sampleOffset);
+        midiMessages.addEvent (juce::MidiMessage::noteOn (note.channel,
+                                                          note.midiNote,
+                                                          (juce::uint8) kMidiVelocity),
+                               sampleOffset);
     }
 }
 
@@ -270,16 +415,17 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     topMagnitudes.fill (0.0f);
     smoothedMagnitudes.fill (0.0f);
     smoothedMagnitudesDb.fill (0.0f);
+    pendingLiveMidiNotes.clear();
+    activeLiveMidiNotes.clear();
+    pendingLiveMidiUpdate = false;
     
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
-    transportSource.prepareToPlay (samplesPerBlock, sampleRate);
     juce::ignoreUnused (sampleRate, samplesPerBlock);
 }
 
 void AudioPluginAudioProcessor::releaseResources()
 {
-    transportSource.releaseResources();
     // When playback stops, you can use this as an opportunity to free up any
     // spare memory, etc.
 }
@@ -311,18 +457,22 @@ bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layou
 
 void AudioPluginAudioProcessor::pushSample (float s)
 {
-    fifo[fifoIndex++] = s;
+    fifo[(size_t) fifoIndex++] = s;
 
     if (fifoIndex >= kFftSize)
     {
-        fifoIndex = 0;
-
         // 把时域数据复制到 FFT buffer 前半部分
         std::copy (fifo.begin(), fifo.end(), fftBuffer.begin());
         // 后半部分清零
         std::fill (fftBuffer.begin() + kFftSize, fftBuffer.end(), 0.0f);
 
         runFftAndFindPeaks();
+
+        // Keep 75% overlap so the live spectrum responds more smoothly.
+        std::memmove (fifo.data(),
+                      fifo.data() + kFftHopSize,
+                      (size_t) (kFftSize - kFftHopSize) * sizeof (float));
+        fifoIndex = kFftSize - kFftHopSize;
     }
 }
 
@@ -330,9 +480,8 @@ void AudioPluginAudioProcessor::pushSample (float s)
 void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                               juce::MidiBuffer& midiMessages)
 {
-    juce::ignoreUnused (midiMessages);
-
     juce::ScopedNoDenormals noDenormals;
+    applyPendingMidiOutputChanges (midiMessages);
 
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -341,62 +490,71 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    const int numSamples  = buffer.getNumSamples();
-    const int numChannels = buffer.getNumChannels();
+    const int numSamples = buffer.getNumSamples();
+    const int numInputChannelsForAnalysis = juce::jmin (totalNumInputChannels, buffer.getNumChannels());
 
     // =====================================================
-    // 1. 选择信号来源：File vs Mic/Host
+    // 1. 始终使用 host audio input；插件本身做直通，分析时将输入下混为单声道
     // =====================================================
-    if (useFileInput && readerSource != nullptr)
+    if (numInputChannelsForAnalysis > 0)
     {
-        // 用文件覆盖当前 buffer
-        juce::AudioSourceChannelInfo info (&buffer, 0, numSamples);
-        buffer.clear();                        // 先清空，避免叠加原输入
-        transportSource.getNextAudioBlock (info);
-    }
-    // else: 不动 buffer → 直接用 host/mic 输入
-
-
-    // =====================================================
-    // 2. 做分析：统一用第 0 个 channel 做 FFT / noisy peaks
-    // =====================================================
-    if (numChannels > 0)
-    {
-        auto* channelData = buffer.getReadPointer (0);
-
         for (int n = 0; n < numSamples; ++n)
-            pushSample (channelData[n]);   // 你原来用来填 FIFO + runFftAndFindPeaks 的入口
+        {
+            float mixedSample = 0.0f;
+
+            for (int channel = 0; channel < numInputChannelsForAnalysis; ++channel)
+                mixedSample += buffer.getReadPointer (channel)[n];
+
+            mixedSample /= (float) numInputChannelsForAnalysis;
+            pushSample (mixedSample);
+        }
+    }
+    else
+    {
+        buffer.clear();
     }
 }
 
 
 void AudioPluginAudioProcessor::runFftAndFindPeaks()
 {
+    std::array<float, kFftSize> analysisFrame {};
+    std::copy_n (fftBuffer.begin(), kFftSize, analysisFrame.begin());
+
     // 1. 加窗 + FFT
-    window.multiplyWithWindowingTable (fftBuffer.data(), kFftSize);
+    window.multiplyWithWindowingTable (analysisFrame.data(), kFftSize);
+    std::copy (analysisFrame.begin(), analysisFrame.end(), fftBuffer.begin());
     fft.performFrequencyOnlyForwardTransform (fftBuffer.data());
 
     const int numBins = kFftSize / 2;
+    std::array<float, kFftSize / 2> currentSpectrumDb {};
+    std::array<float, kFftSize / 2> currentEnvelopeDb {};
+    std::array<float, kFftSize / 2> currentResidualDb {};
 
     // 2. 时间平滑：smoothedMagnitudes = 0.9 * old + 0.1 * new
     for (int bin = 0; bin < numBins; ++bin)
     {
-        float mag = fftBuffer[bin]; // frequency-only FFT 已经是 magnitude
+        float mag = fftBuffer[(size_t) bin]; // frequency-only FFT 已经是 magnitude
 
-        smoothedMagnitudes[bin] =
-            smoothingCoeff * smoothedMagnitudes[bin]
+        smoothedMagnitudes[(size_t) bin] =
+            smoothingCoeff * smoothedMagnitudes[(size_t) bin]
           + (1.0f - smoothingCoeff) * mag;
     }
 
     // 3. 转成 dB（存在 smoothedMagnitudesDb 里）
     for (int bin = 0; bin < numBins; ++bin)
     {
-        float mag = smoothedMagnitudes[bin];
+        float mag = smoothedMagnitudes[(size_t) bin];
 
         if (mag <= 1.0e-6f)
-            smoothedMagnitudesDb[bin] = -120.0f;  // 底噪
+            currentSpectrumDb[(size_t) bin] = -120.0f;  // 底噪
         else
-            smoothedMagnitudesDb[bin] = 20.0f * std::log10 (mag);
+            currentSpectrumDb[(size_t) bin] = 20.0f * std::log10 (mag);
+    }
+
+    {
+        const juce::SpinLock::ScopedLockType lock (fftLock);
+        smoothedMagnitudesDb = currentSpectrumDb;
     }
 
     // ==========================================================
@@ -410,7 +568,7 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
 
     for (int bin = 0; bin < numBins; ++bin)
     {
-        float db = smoothedMagnitudesDb[(size_t) bin];
+        float db = currentSpectrumDb[(size_t) bin];
 
         int bandIdx = (bin * kNumEnvBands) / numBins;
         bandIdx = std::clamp (bandIdx, 0, kNumEnvBands - 1);
@@ -433,59 +591,182 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
         int bandIdx = (bin * kNumEnvBands) / numBins;
         bandIdx = std::clamp (bandIdx, 0, kNumEnvBands - 1);
 
-        envelopeDb[(size_t) bin] = bandEnv[(size_t) bandIdx];
+        currentEnvelopeDb[(size_t) bin] = bandEnv[(size_t) bandIdx];
     }
 
     // ==========================================================
     // 5. residual = smoothedMagnitudesDb - envelopeDb （单位：dB）
     // ==========================================================
     for (int bin = 0; bin < numBins; ++bin)
-        residualDb[(size_t) bin] = smoothedMagnitudesDb[(size_t) bin]
-                                  - envelopeDb[(size_t) bin];
+        currentResidualDb[(size_t) bin] = currentSpectrumDb[(size_t) bin]
+                                        - currentEnvelopeDb[(size_t) bin];
+
+    envelopeDb = currentEnvelopeDb;
+    residualDb = currentResidualDb;
 
     // ==========================================================
-    // 6. 在 residual 上找 "noisy peaks"
-    //    条件：
-    //      - residual > threshold
-    //      - 是局部最大
-    //      - 频率在 100 ~ 5500 Hz 之间
+    // 6. Hybrid ranking:
+    //    - keep the original residual/local-max detector
+    //    - add a low-frequency harmonic-support path so bass fundamentals
+    //      can survive even when the upper partials are stronger
     // ==========================================================
     struct Peak
     {
-        float residualDb;
-        int   binIndex;
+        float score = -1.0e9f;
+        float residualDb = -120.0f;
+        int   binIndex = 0;
     };
 
-    std::vector<Peak> peaks;
-    peaks.reserve (kNumNoisyPeaks * 2);   // 预留多一点以防有很多候选
+    std::vector<Peak> candidates;
+    candidates.reserve ((size_t) kNumNoisyPeaks * 6);
 
-    const float residualThreshold = 3.0f; // 可以自己再调：1.0 / 2.0 / 6.0 ...
-    const float minHz = 40.0f;
+    const auto refinedFrequencyForBin = [&currentSpectrumDb, this] (int binIndex)
+    {
+        const int safeBin = juce::jlimit (1, numBins - 2, binIndex);
+        const float left  = currentSpectrumDb[(size_t) safeBin - 1];
+        const float mid   = currentSpectrumDb[(size_t) safeBin];
+        const float right = currentSpectrumDb[(size_t) safeBin + 1];
+        const float denominator = left - 2.0f * mid + right;
+
+        float delta = 0.0f;
+        if (std::abs (denominator) > 1.0e-6f)
+            delta = 0.5f * (left - right) / denominator;
+
+        delta = juce::jlimit (-0.5f, 0.5f, delta);
+        return ((float) safeBin + delta) * (float) currentSampleRate / (float) kFftSize;
+    };
+
+    const bool useBassBoost = bassBoostMode.load();
+
+    const auto weightedResidualScore = [useBassBoost] (float residualValueDb, float hz)
+    {
+        if (! useBassBoost)
+            return residualValueDb;
+
+        float weight = 1.0f;
+
+        if (hz < 90.0f)
+            weight = 2.2f;
+        else if (hz < 180.0f)
+            weight = 1.6f;
+        else if (hz < 320.0f)
+            weight = 1.2f;
+
+        return residualValueDb * weight;
+    };
+
+    const float residualThreshold = useBassBoost ? 2.4f : 3.0f;
+    const float minHz = useBassBoost ? 28.0f : 40.0f;
     const float maxHz = 4000.0f;
 
     for (int bin = 1; bin < numBins - 1; ++bin)
     {
-        float r = residualDb[(size_t) bin];
-
-        // 先看是否明显高于 envelope
-        if (r <= residualThreshold)
-            continue;
-
-        // 局部最大
-        if (r <= residualDb[(size_t) bin - 1] ||
-            r <= residualDb[(size_t) bin + 1])
-            continue;
-
-        // 频率范围
-        float hz = (float) bin * (float) currentSampleRate / (float) kFftSize;
+        const float hz = (float) bin * (float) currentSampleRate / (float) kFftSize;
         if (hz < minHz || hz > maxHz)
             continue;
 
-        peaks.push_back (Peak { r, bin });
+        const float residual = currentResidualDb[(size_t) bin];
+        if (residual <= residualThreshold)
+            continue;
+
+        if (residual <= currentResidualDb[(size_t) bin - 1]
+            || residual <= currentResidualDb[(size_t) bin + 1])
+            continue;
+
+        candidates.push_back ({ weightedResidualScore (residual, hz), residual, bin });
     }
 
-    // 如果一个都没有，也要清零输出
-    if (peaks.empty())
+    if (useBassBoost)
+    {
+        static constexpr int kBassBoostFftOrder = 13;
+        static constexpr int kBassBoostFftSize = 1 << kBassBoostFftOrder;
+        static juce::dsp::FFT bassBoostFft (kBassBoostFftOrder);
+        static constexpr float harmonicWeights[] = { 0.0f, 0.0f, 0.44f, 0.24f };
+
+        std::array<float, 2 * kBassBoostFftSize> paddedFftBuffer {};
+        std::copy (analysisFrame.begin(), analysisFrame.end(), paddedFftBuffer.begin());
+        bassBoostFft.performFrequencyOnlyForwardTransform (paddedFftBuffer.data());
+
+        std::array<float, kBassBoostFftSize / 2> paddedSpectrumDb {};
+        for (int bin = 0; bin < kBassBoostFftSize / 2; ++bin)
+        {
+            const float mag = paddedFftBuffer[(size_t) bin];
+            paddedSpectrumDb[(size_t) bin] = mag <= 1.0e-6f ? -120.0f
+                                                             : 20.0f * std::log10 (mag);
+        }
+
+        const auto paddedBinForHz = [this] (float hz)
+        {
+            return (int) std::round (hz * (float) kBassBoostFftSize / (float) currentSampleRate);
+        };
+
+        const auto localProminenceDb = [&paddedSpectrumDb] (int centerBin)
+        {
+            const int safeBin = juce::jlimit (6, (int) paddedSpectrumDb.size() - 7, centerBin);
+
+            float localPeak = paddedSpectrumDb[(size_t) safeBin];
+            for (int offset = -1; offset <= 1; ++offset)
+                localPeak = juce::jmax (localPeak, paddedSpectrumDb[(size_t) (safeBin + offset)]);
+
+            const float leftFloor  = 0.5f * (paddedSpectrumDb[(size_t) (safeBin - 6)]
+                                           + paddedSpectrumDb[(size_t) (safeBin - 3)]);
+            const float rightFloor = 0.5f * (paddedSpectrumDb[(size_t) (safeBin + 3)]
+                                           + paddedSpectrumDb[(size_t) (safeBin + 6)]);
+
+            return localPeak - 0.5f * (leftFloor + rightFloor);
+        };
+
+        const int lowBinMin = juce::jmax (8, paddedBinForHz (36.0f));
+        const int lowBinMax = juce::jmin ((int) paddedSpectrumDb.size() - 8, paddedBinForHz (170.0f));
+
+        for (int bin = lowBinMin; bin <= lowBinMax; ++bin)
+        {
+            const float fundamentalHz = (float) bin * (float) currentSampleRate / (float) kBassBoostFftSize;
+            const float baseProminence = localProminenceDb (bin);
+            if (baseProminence < 2.2f)
+                continue;
+
+            float salience = baseProminence * 0.82f;
+            int supportedHarmonics = 0;
+
+            for (int harmonic = 2; harmonic <= 3; ++harmonic)
+            {
+                const int harmonicBin = bin * harmonic;
+                if (harmonicBin >= (int) paddedSpectrumDb.size() - 6)
+                    break;
+
+                const float harmonicProminence = localProminenceDb (harmonicBin);
+
+                if (harmonicProminence > 1.2f)
+                {
+                    salience += harmonicProminence * harmonicWeights[harmonic];
+                    ++supportedHarmonics;
+                }
+            }
+
+            if (supportedHarmonics < 1 || salience < 3.9f)
+                continue;
+
+            const int originalBin = juce::jlimit (1,
+                                                  numBins - 2,
+                                                  (int) std::round (fundamentalHz
+                                                                    * (float) kFftSize
+                                                                    / (float) currentSampleRate));
+
+            const float originalResidual = currentResidualDb[(size_t) originalBin];
+            if (originalResidual < 1.4f)
+                continue;
+
+            const float originalScore = weightedResidualScore (originalResidual, fundamentalHz);
+            const float bassBonus = juce::jmax (0.0f, salience - baseProminence) * 0.42f;
+
+            candidates.push_back ({ originalScore + bassBonus,
+                                    originalResidual,
+                                    originalBin });
+        }
+    }
+
+    if (candidates.empty())
     {
         const juce::SpinLock::ScopedLockType lock (peakLock);
         for (int k = 0; k < kNumNoisyPeaks; ++k)
@@ -496,34 +777,57 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
         return;
     }
 
-    // 按 residual 从大到小排序
-    std::sort (peaks.begin(), peaks.end(),
+    std::sort (candidates.begin(), candidates.end(),
                [] (const Peak& a, const Peak& b)
                {
-                   return a.residualDb > b.residualDb;
+                   return a.score > b.score;
                });
 
-    // ==========================================================
-    // 7. 写入成员 topFrequenciesHz / topMagnitudes（用锁保护）
-    //    注意：topMagnitudes 存的是 “比 envelope 高出的 dB 数”
-    // ==========================================================
+    std::array<float, kNumNoisyPeaks> selectedFreqs {};
+    std::array<float, kNumNoisyPeaks> selectedScores {};
+    selectedFreqs.fill (0.0f);
+    selectedScores.fill (0.0f);
+
+    int selectedCount = 0;
+
+    for (const auto& candidate : candidates)
+    {
+        if (selectedCount >= kNumNoisyPeaks)
+            break;
+
+        const float hz = refinedFrequencyForBin (candidate.binIndex);
+        bool tooClose = false;
+
+        for (int i = 0; i < selectedCount; ++i)
+        {
+            const float minSpacingHz = juce::jmax (18.0f, selectedFreqs[(size_t) i] * 0.045f);
+            if (std::abs (selectedFreqs[(size_t) i] - hz) < minSpacingHz)
+            {
+                tooClose = true;
+                break;
+            }
+        }
+
+        if (tooClose)
+            continue;
+
+        selectedFreqs[(size_t) selectedCount] = hz;
+        selectedScores[(size_t) selectedCount] = candidate.score;
+        ++selectedCount;
+    }
+
     {
         const juce::SpinLock::ScopedLockType lock (peakLock);
 
         for (int k = 0; k < kNumNoisyPeaks; ++k)
         {
-            if (k < (int) peaks.size())
+            if (k < selectedCount)
             {
-                int   binIndex = peaks[(size_t) k].binIndex;
-                float hz       = (float) binIndex * (float) currentSampleRate
-                               / (float) kFftSize;
-
-                topFrequenciesHz[(size_t) k] = hz;
-                topMagnitudes[(size_t) k]    = peaks[(size_t) k].residualDb;
+                topFrequenciesHz[(size_t) k] = selectedFreqs[(size_t) k];
+                topMagnitudes[(size_t) k]    = selectedScores[(size_t) k];
             }
             else
             {
-                // 不足 10 个时，剩下的在“末尾”填 0
                 topFrequenciesHz[(size_t) k] = 0.0f;
                 topMagnitudes[(size_t) k]    = 0.0f;
             }
