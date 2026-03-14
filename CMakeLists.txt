@@ -24,7 +24,16 @@ project(SPEKANA VERSION 0.0.1)
 # find_package(JUCE CONFIG REQUIRED)        # If you've installed JUCE to your system
 # or
 # add_subdirectory(JUCE)                    # If you've put JUCE in a subdirectory called JUCE
-add_subdirectory("/Users/yifengyuan/desktop/juce" ${CMAKE_BINARY_DIR}/JUCE)
+set(JUCE_SOURCE_DIR "${JUCE_SOURCE_DIR}" CACHE PATH "Path to a local JUCE checkout")
+
+if(JUCE_SOURCE_DIR)
+    add_subdirectory("${JUCE_SOURCE_DIR}" ${CMAKE_BINARY_DIR}/JUCE)
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/JUCE/CMakeLists.txt")
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/JUCE" ${CMAKE_BINARY_DIR}/JUCE)
+else()
+    message(FATAL_ERROR
+        "JUCE not found. Set -DJUCE_SOURCE_DIR=/path/to/JUCE or add JUCE to ./JUCE.")
+endif()
 
 # If you are building a VST2 or AAX plugin, CMake needs to be told where to find these SDKs on your
 # system. This setup should be done before calling `juce_add_plugin`.
