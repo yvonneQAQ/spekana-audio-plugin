@@ -1,4 +1,5 @@
 # SPEKANA
+[![Download for macOS](https://img.shields.io/badge/Download-macOS_VST3-A3B18A?style=for-the-badge&logo=apple)](https://github.com/yvonneQAQ/PeakSpectrogramPlugin/releases/latest)
 
 `SPEKANA` is a JUCE-based audio analysis plugin focused on live spectrogram display, peak-based pitch tracking, freeze-to-score capture, and MIDI export.
 
