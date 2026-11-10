@@ -1,5 +1,5 @@
 # SPEKANA
-[![Download for macOS](https://img.shields.io/badge/Download-macOS_VST3-A3B18A?style=for-the-badge&logo=apple)](https://github.com/yvonneQAQ/PeakSpectrogramPlugin/releases/latest)
+[![Download for macOS](https://img.shields.io/badge/Download-macOS_VST3-A3B18A?style=for-the-badge&logo=apple)](https://github.com/yvonneQAQ/spekana-audio-plugin/releases/latest)
 
 `SPEKANA` is a JUCE-based audio analysis plugin focused on live spectrogram display, peak-based pitch tracking, freeze-to-score capture, and MIDI export.
 
@@ -19,6 +19,8 @@ One of its main intentions is to transform textured sound into usable MIDI mater
 - Quarter-tone notation using arrow accidentals in the score
 - `Freeze / Unfreeze / Reset` workflow for capturing chords over time
 - Embedded grand-staff score view
+- Auto chord capture at detected onsets and a detailed view of audio descriptors
+- Adjustable peak threshold for the displayed and captured notes
 - Absolute peak-level mapping to per-note MIDI velocity and score opacity
 - MIDI export from frozen chords and detailed descriptor analysis
 - Export time scaling at `*1`, `*2`, `*4`, `*5`, or `*10`
@@ -64,6 +66,8 @@ In other words, the input can be music, non-music, or anything in between, as lo
 
 This workflow is designed not only for transcription, but for re-composition: a texture can become harmonic material, a score sketch, or an analytical trace.
 
+For automatic capture, switch to `Auto`, press `Start`, and play the source. After stopping, open `Detail Analysis` to inspect the descriptors and drag the analysis as MIDI.
+
 ## Pitch / Analysis Behavior
 
 The detector is currently best described as a hybrid spectral peak detector rather than a strict monophonic pitch detector.
@@ -106,7 +110,7 @@ Completed Auto analysis can also export a combined MIDI file containing notes an
 - CC22: spectral flux
 - CC23: spectral spread
 - CC24: spectral flatness
-- CC25: stereo energy
+- CC25: left/right stereo energy balance (stereo input)
 
 Before dragging or exporting combined MIDI, its complete timeline can be stretched to `*1`, `*2`, `*4`, `*5`, or `*10`. Notes, note lengths, pitch bends, and descriptor CC events remain aligned.
 
