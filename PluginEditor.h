@@ -88,8 +88,8 @@ private:
                             float maxValue,
                             bool available,
                             const std::function<float (const DetailAnalysisFrame&)>& valueForFrame);
-    void processAutoOnsetDetection (double nowSeconds);
-    void captureAutoChord (double nowSeconds);
+    void consumeAutoOnsetEvents (double nowSeconds);
+    void captureAutoChord (double nowSeconds, double detectedOnsetTimeSeconds = -1.0);
     void refreshBassBoostButtonText();
     void captureFrozenChord();
     void refreshStaffComponent();
@@ -119,8 +119,6 @@ private:
 
     // 🔹 后台最新分析结果（每帧更新，但不一定马上显示）
     std::array<float, kFftSize / 2>   latestSpectrum   { };
-    std::array<float, kFftSize / 2>   latestResidual   { };
-    std::array<float, kFftSize / 2>   previousAutoResidual { };
     std::array<float, kFftSize / 2>   previousDetailSpectrum { };
     std::array<float, kNumNoisyPeaks> latestTopFreqs   { };
     std::array<float, kNumNoisyPeaks> latestTopMags    { };
@@ -140,6 +138,7 @@ private:
     juce::TextButton autoClearButton { "Clear" };
     juce::TextButton detailAnalysisButton { "Detail Analysis" };
     juce::Slider topPeakCountSlider;
+    juce::Slider peakThresholdSlider;
     std::unique_ptr<CaptureModeSelector> captureModeSelector;
     std::unique_ptr<TuningSelector> tuningSelector;
     std::unique_ptr<SensitivityControl> sensitivityControl;
@@ -166,19 +165,13 @@ private:
     };
     DetailViewMode detailViewMode = DetailViewMode::grid;
     bool isAutoRunning = false;
-    bool hasPreviousAutoResidual = false;
-    bool hasPreviousAutoInputLevel = false;
     bool hasPreviousDetailSpectrum = false;
     bool hasCompletedAutoAnalysis = false;
     bool hasObservedHostPlaybackSinceAutoStart = false;
     bool previousHostTransportPlaying = false;
     int autoCaptureCount = 0;
+    std::uint32_t activeAutoOnsetSession = 0;
     double autoStartWallTimeSeconds = 0.0;
-    double lastAutoOnsetWallTimeSeconds = -10.0;
-    float autoFluxMean = 0.0f;
-    float autoFluxDeviation = 1.0f;
-    float autoOnsetStrength = 0.0f;
-    float previousAutoInputLevelDb = -120.0f;
     std::vector<DetailAnalysisFrame> detailAnalysisHistory;
     int analysisHoverTarget = -1;
     size_t analysisHoverFrameIndex = 0;

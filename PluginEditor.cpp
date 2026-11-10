@@ -17,7 +17,6 @@ namespace
     constexpr int kMaxAutoChordsSafety = 128;
     constexpr int kMaxDetailAnalysisFrames = 2400;
     constexpr double kMaxAutoDurationSeconds = 30.0;
-    constexpr double kAutoMinimumGapMs = 100.0;
     constexpr float kPeakIntensityFloorDbFs = -72.0f;
     constexpr float kPeakIntensityCeilingDbFs = -6.0f;
     constexpr int kMinimumPartialVelocity = 1;
@@ -35,7 +34,7 @@ namespace
     constexpr int kTitleAreaHeight = 44;
     constexpr int kRightPanelInset = 12;
     constexpr int kBottomInfoHeight = 25;
-    constexpr int kPeakTextAreaHeight = 132;
+    constexpr int kPeakTextAreaHeight = 160;
     constexpr int kDetailHeaderHeight = 25;
     constexpr int kDetailDragWidth = 155;
     constexpr int kDetailTimeScaleWidth = 185;
@@ -1390,14 +1389,11 @@ namespace
 class SensitivityControl : public juce::Component
 {
 public:
+    std::function<void(float)> onSensitivityChanged;
+
     float getSensitivity() const noexcept
     {
         return juce::jmap (sensitivityPosition, 1.0f, 8.0f);
-    }
-
-    double getMinGapMs() const noexcept
-    {
-        return kAutoMinimumGapMs;
     }
 
     void paint (juce::Graphics& g) override
@@ -1467,6 +1463,9 @@ private:
         sensitivityPosition = juce::jlimit (0.0f, 1.0f,
                                             (position.x - plot.getX()) / plot.getWidth());
         repaint();
+
+        if (onSensitivityChanged != nullptr)
+            onSensitivityChanged (getSensitivity());
     }
 };
 
@@ -1938,9 +1937,8 @@ private:
             const float xOffset = (clusterIndex % 2 == 0) ? 0.0f : 2.8f;
             const float noteX = centerX + xOffset;
             const float noteY = yForDiatonicNumber (area, note.diatonicNumber);
-            // The detected peak level is already linearly normalised from the
-            // fixed dBFS calibration range. Keep notation linear as well; the
-            // small alpha floor preserves very quiet detected notes.
+            // Keep score opacity on the linear dB-position mapping; the small
+            // alpha floor preserves very quiet detected notes.
             const float noteAlpha = juce::jmap (
                 juce::jlimit (0.0f, 1.0f, note.intensity),
                 0.06f,
@@ -2290,6 +2288,7 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     addAndMakeVisible (autoClearButton);
     addAndMakeVisible (detailAnalysisButton);
     addAndMakeVisible (topPeakCountSlider);
+    addAndMakeVisible (peakThresholdSlider);
 
     captureModeSelector = std::make_unique<CaptureModeSelector>();
     addAndMakeVisible (*captureModeSelector);
@@ -2299,6 +2298,10 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
 
     sensitivityControl = std::make_unique<SensitivityControl>();
     addAndMakeVisible (*sensitivityControl);
+    sensitivityControl->onSensitivityChanged = [this] (float sensitivity)
+    {
+        processorRef.setAutoOnsetSensitivity (sensitivity);
+    };
 
     staffComponent = std::make_unique<FrozenChordStaffComponent>();
     addAndMakeVisible (*staffComponent);
@@ -2390,6 +2393,10 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
         detailAnalysisHistory.clear();
         hasCompletedAutoAnalysis = false;
         resetAutoDetectorState();
+        const float sensitivity = sensitivityControl != nullptr
+                                    ? sensitivityControl->getSensitivity()
+                                    : 6.0f;
+        activeAutoOnsetSession = processorRef.startAutoOnsetDetection (sensitivity);
         refreshAutoButtonStates();
         refreshDetailAnalysisButtonState();
         refreshExportButtonState();
@@ -2458,6 +2465,24 @@ AudioPluginAudioProcessorEditor::AudioPluginAudioProcessorEditor (AudioPluginAud
     topPeakCountSlider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
     topPeakCountSlider.onValueChange = [this]()
     {
+        repaint();
+    };
+
+    peakThresholdSlider.setRange (-72.0, 0.0, 1.0);
+    peakThresholdSlider.setValue ((double) processorRef.getPeakDetectionThresholdDbFs(),
+                                  juce::dontSendNotification);
+    peakThresholdSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    peakThresholdSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 55, 19);
+    peakThresholdSlider.setTextValueSuffix (" dB");
+    peakThresholdSlider.setNumDecimalPlacesToDisplay (0);
+    peakThresholdSlider.setColour (juce::Slider::trackColourId, kButtonTerracotta);
+    peakThresholdSlider.setColour (juce::Slider::thumbColourId, kButtonTerracottaStrong);
+    peakThresholdSlider.setColour (juce::Slider::backgroundColourId, kPanelTint.withAlpha (0.63f));
+    peakThresholdSlider.setColour (juce::Slider::textBoxTextColourId, kTextPrimary);
+    peakThresholdSlider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    peakThresholdSlider.onValueChange = [this]()
+    {
+        processorRef.setPeakDetectionThresholdDbFs ((float) peakThresholdSlider.getValue());
         repaint();
     };
 
@@ -2607,6 +2632,7 @@ unfreezeButton.onClick = [this]()
 
 AudioPluginAudioProcessorEditor::~AudioPluginAudioProcessorEditor()
 {
+    processorRef.stopAutoOnsetDetection();
     setLookAndFeel (nullptr);
 }
 
@@ -2708,16 +2734,10 @@ void AudioPluginAudioProcessorEditor::refreshAutoButtonStates()
 
 void AudioPluginAudioProcessorEditor::resetAutoDetectorState()
 {
-    previousAutoResidual.fill (0.0f);
     previousDetailSpectrum.fill (0.0f);
-    hasPreviousAutoResidual = false;
-    hasPreviousAutoInputLevel = false;
     hasPreviousDetailSpectrum = false;
-    autoFluxMean = 0.0f;
-    autoFluxDeviation = 0.18f;
-    autoOnsetStrength = 0.0f;
-    previousAutoInputLevelDb = -120.0f;
-    lastAutoOnsetWallTimeSeconds = -10.0;
+    processorRef.stopAutoOnsetDetection();
+    activeAutoOnsetSession = 0;
 }
 
 void AudioPluginAudioProcessorEditor::finishAutoAnalysis (double nowSeconds,
@@ -2729,6 +2749,7 @@ void AudioPluginAudioProcessorEditor::finishAutoAnalysis (double nowSeconds,
                                                          nowSeconds - autoStartWallTimeSeconds);
 
     isAutoRunning = false;
+    processorRef.stopAutoOnsetDetection();
     hasCompletedAutoAnalysis = ! detailAnalysisHistory.empty();
 
     if (clearLiveChord)
@@ -2946,7 +2967,8 @@ void AudioPluginAudioProcessorEditor::refreshDetailAnalysisButtonState()
     }
 }
 
-void AudioPluginAudioProcessorEditor::captureAutoChord (double nowSeconds)
+void AudioPluginAudioProcessorEditor::captureAutoChord (double nowSeconds,
+                                                         double detectedOnsetTimeSeconds)
 {
     if (autoCaptureCount >= kMaxAutoChordsSafety)
     {
@@ -2956,7 +2978,9 @@ void AudioPluginAudioProcessorEditor::captureAutoChord (double nowSeconds)
         return;
     }
 
-    const double startTimeSeconds = juce::jmax (0.0, nowSeconds - autoStartWallTimeSeconds);
+    const double startTimeSeconds = detectedOnsetTimeSeconds >= 0.0
+                                      ? detectedOnsetTimeSeconds
+                                      : juce::jmax (0.0, nowSeconds - autoStartWallTimeSeconds);
 
     if (! frozenChords.empty() && frozenChords.back().label.startsWith ("Auto "))
         frozenChords.back().endTimeSeconds = juce::jmax (frozenChords.back().startTimeSeconds + 0.05,
@@ -2994,7 +3018,7 @@ void AudioPluginAudioProcessorEditor::captureAutoChord (double nowSeconds)
     refreshAutoButtonStates();
 }
 
-void AudioPluginAudioProcessorEditor::processAutoOnsetDetection (double nowSeconds)
+void AudioPluginAudioProcessorEditor::consumeAutoOnsetEvents (double nowSeconds)
 {
     if (! isAutoMode() || ! isAutoRunning)
         return;
@@ -3012,88 +3036,10 @@ void AudioPluginAudioProcessorEditor::processAutoOnsetDetection (double nowSecon
         return;
     }
 
-    constexpr float kLevelTriggerFloorDb = -72.0f;
-    constexpr float kSignificantLevelRiseDb = 6.0f;
-
-    const float inputLevelDb = processorRef.getInputLevelDb();
-    bool significantLevelRise = false;
-
-    if (hasPreviousAutoInputLevel)
-    {
-        significantLevelRise = inputLevelDb > kLevelTriggerFloorDb
-                            && inputLevelDb - previousAutoInputLevelDb > kSignificantLevelRiseDb;
-    }
-
-    previousAutoInputLevelDb = inputLevelDb;
-    hasPreviousAutoInputLevel = true;
-
-    bool spectralOnsetDetected = false;
-    float threshold = 0.0f;
-
-    // Keep the existing residual-flux detector unchanged as route A. Route B
-    // (the level-rise trigger above) can capture independently of this block.
-    if (inputLevelDb > -96.0f && hasPreviousAutoResidual)
-    {
-        const float sampleRate = (float) processorRef.getSampleRate();
-
-        if (sampleRate > 0.0f)
-        {
-            const int numBins = (int) latestResidual.size();
-            const int minBin = juce::jlimit (1, numBins - 2, (int) std::floor (40.0f * (float) kFftSize / sampleRate));
-            const int maxBin = juce::jlimit (minBin + 1, numBins - 2, (int) std::ceil (4000.0f * (float) kFftSize / sampleRate));
-
-            float flux = 0.0f;
-            float strongestRise = 0.0f;
-            int contributingBins = 0;
-
-            for (int bin = minBin; bin <= maxBin; ++bin)
-            {
-                const float rise = latestResidual[(size_t) bin] - previousAutoResidual[(size_t) bin];
-                strongestRise = juce::jmax (strongestRise, rise);
-
-                if (rise > 0.18f)
-                {
-                    flux += rise;
-                    ++contributingBins;
-                }
-            }
-
-            if (contributingBins > 0)
-                flux /= (float) contributingBins;
-
-            const float instantOnsetStrength = 0.68f * flux + 0.32f * strongestRise;
-            autoOnsetStrength = 0.58f * autoOnsetStrength + 0.42f * instantOnsetStrength;
-
-            const float previousMean = autoFluxMean;
-            autoFluxMean = 0.985f * autoFluxMean + 0.015f * autoOnsetStrength;
-            autoFluxDeviation = 0.985f * autoFluxDeviation
-                              + 0.015f * std::abs (autoOnsetStrength - previousMean);
-
-            const float sensitivity = sensitivityControl != nullptr
-                                        ? sensitivityControl->getSensitivity()
-                                        : 6.0f;
-            const float thresholdScale = juce::jmap (sensitivity, 1.0f, 8.0f, 3.2f, 1.1f);
-            threshold = autoFluxMean + thresholdScale * juce::jmax (0.18f, autoFluxDeviation);
-            spectralOnsetDetected = autoOnsetStrength > threshold && autoOnsetStrength > 0.28f;
-        }
-    }
-
-    previousAutoResidual = latestResidual;
-    hasPreviousAutoResidual = true;
-
-    const double minGapSeconds = (sensitivityControl != nullptr
-                                    ? sensitivityControl->getMinGapMs()
-                                    : kAutoMinimumGapMs) * 0.001;
-    const bool outsideRefractory = (nowSeconds - lastAutoOnsetWallTimeSeconds) >= minGapSeconds;
-
-    if (outsideRefractory && (spectralOnsetDetected || significantLevelRise))
-    {
-        captureAutoChord (nowSeconds);
-        lastAutoOnsetWallTimeSeconds = nowSeconds;
-        autoOnsetStrength = 0.0f;
-        if (spectralOnsetDetected)
-            autoFluxMean = threshold;
-    }
+    AudioPluginAudioProcessor::AutoOnsetEvent event;
+    if (activeAutoOnsetSession != 0
+        && processorRef.consumeAutoOnsetEvent (activeAutoOnsetSession, event))
+        captureAutoChord (nowSeconds, event.timeSeconds);
 }
 
 void AudioPluginAudioProcessorEditor::refreshBassBoostButtonText()
@@ -3206,8 +3152,6 @@ void AudioPluginAudioProcessorEditor::resetFrozenState()
     topMagsForDrawing.fill (0.0f);
     topPeakLevelsDbFsForDrawing.fill (-120.0f);
     latestSpectrum.fill (0.0f);
-    latestResidual.fill (0.0f);
-    previousAutoResidual.fill (0.0f);
     latestTopFreqs.fill (0.0f);
     latestTopMags.fill (0.0f);
     latestTopPeakLevelsDbFs.fill (-120.0f);
@@ -4220,6 +4164,12 @@ void AudioPluginAudioProcessorEditor::paint (juce::Graphics& g)
                 juce::Justification::centredLeft);
     inner.removeFromTop (4);
 
+    auto peakThresholdControlArea = inner.removeFromTop (24);
+    g.drawText ("Threshold",
+                peakThresholdControlArea.removeFromLeft (52),
+                juce::Justification::centredLeft);
+    inner.removeFromTop (4);
+
     g.setFont (makeUIFont (9.8f, false));
 
     const int numCols       = 2;
@@ -4447,6 +4397,8 @@ void AudioPluginAudioProcessorEditor::resized()
     auto peakInner = peakTextArea.reduced (2, 4);
     peakInner.removeFromTop (26);
     topPeakCountSlider.setBounds (peakInner.removeFromTop (24).withTrimmedLeft (37).reduced (0, 2));
+    peakInner.removeFromTop (4);
+    peakThresholdSlider.setBounds (peakInner.removeFromTop (24).withTrimmedLeft (53).reduced (0, 2));
 
     const bool showDetailViews = isDetailPageActive
                               && hasCompletedAutoAnalysis
@@ -4565,7 +4517,6 @@ void AudioPluginAudioProcessorEditor::pushSpectrumToImage()
 void AudioPluginAudioProcessorEditor::timerCallback()
 {
     processorRef.getSpectrumCopy (latestSpectrum);
-    processorRef.getResidualCopy (latestResidual);
     processorRef.getTopPeaksCopy (latestTopFreqs,
                                   latestTopMags,
                                   latestTopPeakLevelsDbFs);
@@ -4594,7 +4545,7 @@ void AudioPluginAudioProcessorEditor::timerCallback()
     }
 
     recordDetailAnalysisFrame (nowSeconds);
-    processAutoOnsetDetection (nowSeconds);
+    consumeAutoOnsetEvents (nowSeconds);
     pushSpectrumToImage();
 
     if (staffComponent != nullptr)

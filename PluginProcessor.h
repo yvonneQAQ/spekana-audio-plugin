@@ -2,6 +2,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -105,17 +106,31 @@ double currentSampleRate = 44100.0;
 
 // 在 AudioPluginAudioProcessor.h 里 public 区加：
 void getSpectrumCopy (std::array<float, kFftSize / 2>& dest) const;
-// Copies the full residual spectrum for the editor's spectral-flux onset detector.
+// Copies the display residual spectrum for diagnostics and visual consumers.
 void getResidualCopy (std::array<float, kFftSize / 2>& dest) const;
 void getTopPeaksCopy (std::array<float, kNumNoisyPeaks>& freqs,
                       std::array<float, kNumNoisyPeaks>& residualsDb,
                       std::array<float, kNumNoisyPeaks>& peakLevelsDbFs) const;
+
+struct AutoOnsetEvent
+{
+    std::uint32_t sessionId = 0;
+    double timeSeconds = 0.0;
+};
+
+std::uint32_t startAutoOnsetDetection (float sensitivity);
+void stopAutoOnsetDetection();
+void setAutoOnsetSensitivity (float sensitivity);
+bool consumeAutoOnsetEvent (std::uint32_t expectedSessionId, AutoOnsetEvent& event);
+
 void setLiveFrozenMidiChord (const std::array<float, kNumNoisyPeaks>& freqsHz,
                             const std::array<float, kNumNoisyPeaks>& partialIntensities,
                             bool useQuarterToneMode);
 void clearLiveFrozenMidiChord();
 void setBassBoostMode (bool shouldUseBassBoost);
 bool getBassBoostMode() const;
+void setPeakDetectionThresholdDbFs (float thresholdDbFs);
+float getPeakDetectionThresholdDbFs() const;
 float getInputLevelDb() const;
 bool getStereoPanAvailable() const;
 float getStereoPanEnergy() const;
@@ -138,17 +153,41 @@ void updateEnvelopeAndNoisyPeaks();
 
 private:
     void applyPendingMidiOutputChanges (juce::MidiBuffer& midiMessages);
+    void updateAutoOnsetDetector (float analysisFrameLevelDb);
+    void resetAutoOnsetDetectorForSession (std::uint32_t sessionId);
+    void publishAutoOnsetEvent (std::uint32_t sessionId, std::uint64_t elapsedSamples);
 
     juce::SpinLock liveMidiLock;
     std::vector<LiveMidiNote> pendingLiveMidiNotes;
     std::vector<LiveMidiNote> activeLiveMidiNotes;
     bool pendingLiveMidiUpdate = false;
     std::atomic<bool> bassBoostMode { false };
+    std::atomic<float> peakDetectionThresholdDbFs { -30.0f };
     std::atomic<float> inputLevelDb { -120.0f };
     std::atomic<bool> stereoPanAvailable { false };
     std::atomic<float> stereoPanEnergy { 0.0f };
     std::atomic<bool> hostTransportStateAvailable { false };
     std::atomic<bool> hostTransportPlaying { false };
+
+    // The display spectrum deliberately keeps its slower 0.9 smoothing. Auto
+    // onset detection owns this separate, lightly-smoothed magnitude path and
+    // advances once per FFT hop on the audio thread.
+    std::array<float, kFftSize / 2> onsetMagnitudes {};
+    std::array<float, kFftSize / 2> previousOnsetSpectrum {};
+    bool hasPreviousOnsetSpectrum = false;
+    float previousOnsetFrameLevelDb = -120.0f;
+    float autoOnsetFluxMean = 0.0f;
+    float autoOnsetFluxDeviation = 0.01f;
+    std::uint64_t analysisSampleCounter = 0;
+    std::uint64_t autoOnsetStartSample = 0;
+    std::uint64_t lastAutoOnsetSample = 0;
+    bool hasLastAutoOnsetSample = false;
+    std::uint32_t activeAutoOnsetSession = 0;
+
+    std::atomic<bool> autoOnsetDetectionEnabled { false };
+    std::atomic<float> autoOnsetSensitivity { 6.0f };
+    std::atomic<std::uint32_t> requestedAutoOnsetSession { 0 };
+    std::atomic<std::uint64_t> pendingAutoOnsetEventToken { 0 };
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)

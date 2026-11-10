@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace
@@ -207,6 +208,175 @@ void AudioPluginAudioProcessor::getTopPeaksCopy (std::array<float, kNumNoisyPeak
     }
 }
 
+std::uint32_t AudioPluginAudioProcessor::startAutoOnsetDetection (float sensitivity)
+{
+    setAutoOnsetSensitivity (sensitivity);
+    pendingAutoOnsetEventToken.store (0, std::memory_order_release);
+
+    const auto sessionId = requestedAutoOnsetSession.fetch_add (1, std::memory_order_acq_rel) + 1;
+    autoOnsetDetectionEnabled.store (true, std::memory_order_release);
+    return sessionId;
+}
+
+void AudioPluginAudioProcessor::stopAutoOnsetDetection()
+{
+    autoOnsetDetectionEnabled.store (false, std::memory_order_release);
+}
+
+void AudioPluginAudioProcessor::setAutoOnsetSensitivity (float sensitivity)
+{
+    autoOnsetSensitivity.store (juce::jlimit (1.0f, 8.0f, sensitivity),
+                                std::memory_order_relaxed);
+}
+
+bool AudioPluginAudioProcessor::consumeAutoOnsetEvent (std::uint32_t expectedSessionId,
+                                                        AutoOnsetEvent& event)
+{
+    const auto token = pendingAutoOnsetEventToken.exchange (0, std::memory_order_acq_rel);
+    if (token == 0)
+        return false;
+
+    event.sessionId = (std::uint32_t) (token >> 32);
+    const auto elapsedSamples = (std::uint32_t) (token & 0xffffffffu);
+    event.timeSeconds = getSampleRate() > 0.0
+                          ? (double) elapsedSamples / getSampleRate()
+                          : 0.0;
+    return event.sessionId == expectedSessionId;
+}
+
+void AudioPluginAudioProcessor::resetAutoOnsetDetectorForSession (std::uint32_t sessionId)
+{
+    onsetMagnitudes.fill (0.0f);
+    previousOnsetSpectrum.fill (0.0f);
+    hasPreviousOnsetSpectrum = false;
+    previousOnsetFrameLevelDb = -120.0f;
+    autoOnsetFluxMean = 0.0f;
+    autoOnsetFluxDeviation = 0.01f;
+    autoOnsetStartSample = analysisSampleCounter;
+    lastAutoOnsetSample = 0;
+    hasLastAutoOnsetSample = false;
+    activeAutoOnsetSession = sessionId;
+}
+
+void AudioPluginAudioProcessor::publishAutoOnsetEvent (std::uint32_t sessionId,
+                                                        std::uint64_t elapsedSamples)
+{
+    const auto boundedElapsedSamples = (std::uint32_t) juce::jmin (
+        elapsedSamples,
+        (std::uint64_t) std::numeric_limits<std::uint32_t>::max());
+    const auto token = ((std::uint64_t) sessionId << 32) | boundedElapsedSamples;
+    pendingAutoOnsetEventToken.store (token, std::memory_order_release);
+}
+
+void AudioPluginAudioProcessor::updateAutoOnsetDetector (float analysisFrameLevelDb)
+{
+    if (! autoOnsetDetectionEnabled.load (std::memory_order_acquire))
+        return;
+
+    const auto requestedSession = requestedAutoOnsetSession.load (std::memory_order_acquire);
+    if (activeAutoOnsetSession != requestedSession)
+        resetAutoOnsetDetectorForSession (requestedSession);
+
+    const float sampleRate = (float) currentSampleRate;
+    if (sampleRate <= 0.0f)
+        return;
+
+    constexpr float kMinimumAnalysisLevelDb = -72.0f;
+    constexpr float kOnsetSmoothingTimeSeconds = 0.00663f;
+    constexpr float kAdaptiveThresholdTimeSeconds = 2.2f;
+    constexpr float kAllowedFrameLevelFallDb = 1.5f;
+
+    const int numBins = kFftSize / 2;
+    const int minBin = juce::jlimit (1,
+                                     numBins - 2,
+                                     (int) std::floor (40.0f * (float) kFftSize / sampleRate));
+    const int maxBin = juce::jlimit (minBin + 1,
+                                     numBins - 2,
+                                     (int) std::ceil (4000.0f * (float) kFftSize / sampleRate));
+    const float hopSeconds = (float) kFftHopSize / sampleRate;
+    const float onsetSmoothing = std::exp (-hopSeconds / kOnsetSmoothingTimeSeconds);
+    const float adaptiveSmoothing = std::exp (-hopSeconds / kAdaptiveThresholdTimeSeconds);
+
+    double magnitudeSum = 0.0;
+    for (int bin = minBin; bin <= maxBin; ++bin)
+    {
+        const float magnitude = fftBuffer[(size_t) bin];
+        onsetMagnitudes[(size_t) bin] = onsetSmoothing * onsetMagnitudes[(size_t) bin]
+                                      + (1.0f - onsetSmoothing) * magnitude;
+        magnitudeSum += onsetMagnitudes[(size_t) bin];
+    }
+
+    std::array<float, kFftSize / 2> currentOnsetSpectrum {};
+    float spectralFlux = 0.0f;
+
+    if (magnitudeSum > 1.0e-9)
+    {
+        const float inverseMagnitudeSum = (float) (1.0 / magnitudeSum);
+
+        for (int bin = minBin; bin <= maxBin; ++bin)
+        {
+            const float normalisedMagnitude = onsetMagnitudes[(size_t) bin]
+                                            * inverseMagnitudeSum;
+            currentOnsetSpectrum[(size_t) bin] = normalisedMagnitude;
+
+            if (hasPreviousOnsetSpectrum)
+                spectralFlux += juce::jmax (0.0f,
+                                             normalisedMagnitude
+                                               - previousOnsetSpectrum[(size_t) bin]);
+        }
+    }
+
+    const float sensitivity = autoOnsetSensitivity.load (std::memory_order_relaxed);
+    const float thresholdScale = juce::jmap (sensitivity, 1.0f, 8.0f, 5.0f, 1.5f);
+    const float minimumSpectralFlux = juce::jmap (sensitivity, 1.0f, 8.0f, 0.18f, 0.06f);
+    const float significantLevelRiseDb = juce::jmap (sensitivity, 1.0f, 8.0f, 4.0f, 2.0f);
+    const float minimumGapMs = juce::jmap (sensitivity, 1.0f, 8.0f, 250.0f, 100.0f);
+    const float adaptiveThreshold = autoOnsetFluxMean
+                                  + thresholdScale
+                                    * juce::jmax (0.01f, autoOnsetFluxDeviation);
+
+    const bool signalIsAudible = analysisFrameLevelDb > kMinimumAnalysisLevelDb;
+    const bool levelRiseDetected = signalIsAudible
+                                && (! hasPreviousOnsetSpectrum
+                                    || analysisFrameLevelDb - previousOnsetFrameLevelDb
+                                         > significantLevelRiseDb);
+    const bool spectrumIsNotSimplyDecaying = ! hasPreviousOnsetSpectrum
+                                          || analysisFrameLevelDb
+                                               >= previousOnsetFrameLevelDb
+                                                    - kAllowedFrameLevelFallDb;
+    const bool spectralOnsetDetected = signalIsAudible
+                                    && hasPreviousOnsetSpectrum
+                                    && spectrumIsNotSimplyDecaying
+                                    && spectralFlux > adaptiveThreshold
+                                    && spectralFlux > minimumSpectralFlux;
+
+    const auto minimumGapSamples = (std::uint64_t) std::round ((double) minimumGapMs
+                                                               * 0.001
+                                                               * (double) sampleRate);
+    const bool outsideRefractory = ! hasLastAutoOnsetSample
+                                || analysisSampleCounter - lastAutoOnsetSample
+                                     >= minimumGapSamples;
+
+    if (outsideRefractory && (spectralOnsetDetected || levelRiseDetected))
+    {
+        publishAutoOnsetEvent (requestedSession,
+                               analysisSampleCounter - autoOnsetStartSample);
+        lastAutoOnsetSample = analysisSampleCounter;
+        hasLastAutoOnsetSample = true;
+    }
+
+    const float previousMean = autoOnsetFluxMean;
+    autoOnsetFluxMean = adaptiveSmoothing * autoOnsetFluxMean
+                      + (1.0f - adaptiveSmoothing) * spectralFlux;
+    autoOnsetFluxDeviation = adaptiveSmoothing * autoOnsetFluxDeviation
+                           + (1.0f - adaptiveSmoothing)
+                             * std::abs (spectralFlux - previousMean);
+
+    previousOnsetSpectrum = currentOnsetSpectrum;
+    previousOnsetFrameLevelDb = analysisFrameLevelDb;
+    hasPreviousOnsetSpectrum = true;
+}
+
 void AudioPluginAudioProcessor::setLiveFrozenMidiChord (
     const std::array<float, kNumNoisyPeaks>& freqsHz,
     const std::array<float, kNumNoisyPeaks>& partialIntensities,
@@ -269,6 +439,16 @@ void AudioPluginAudioProcessor::setBassBoostMode (bool shouldUseBassBoost)
 bool AudioPluginAudioProcessor::getBassBoostMode() const
 {
     return bassBoostMode.load();
+}
+
+void AudioPluginAudioProcessor::setPeakDetectionThresholdDbFs (float thresholdDbFs)
+{
+    peakDetectionThresholdDbFs.store (juce::jlimit (-72.0f, 0.0f, thresholdDbFs));
+}
+
+float AudioPluginAudioProcessor::getPeakDetectionThresholdDbFs() const
+{
+    return peakDetectionThresholdDbFs.load();
 }
 
 float AudioPluginAudioProcessor::getInputLevelDb() const
@@ -477,6 +657,18 @@ void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     topPeakLevelsDbFs.fill (-120.0f);
     smoothedMagnitudes.fill (0.0f);
     smoothedMagnitudesDb.fill (0.0f);
+    onsetMagnitudes.fill (0.0f);
+    previousOnsetSpectrum.fill (0.0f);
+    hasPreviousOnsetSpectrum = false;
+    previousOnsetFrameLevelDb = -120.0f;
+    autoOnsetFluxMean = 0.0f;
+    autoOnsetFluxDeviation = 0.01f;
+    analysisSampleCounter = 0;
+    autoOnsetStartSample = 0;
+    lastAutoOnsetSample = 0;
+    hasLastAutoOnsetSample = false;
+    activeAutoOnsetSession = 0;
+    pendingAutoOnsetEventToken.store (0, std::memory_order_relaxed);
     pendingLiveMidiNotes.clear();
     activeLiveMidiNotes.clear();
     pendingLiveMidiUpdate = false;
@@ -520,6 +712,7 @@ bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layou
 void AudioPluginAudioProcessor::pushSample (float s)
 {
     fifo[(size_t) fifoIndex++] = s;
+    ++analysisSampleCounter;
 
     if (fifoIndex >= kFftSize)
     {
@@ -641,6 +834,15 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
     std::array<float, kFftSize> analysisFrame {};
     std::copy_n (fftBuffer.begin(), kFftSize, analysisFrame.begin());
 
+    double frameSumSquares = 0.0;
+    for (const auto sample : analysisFrame)
+        frameSumSquares += (double) sample * (double) sample;
+
+    const double frameRms = std::sqrt (frameSumSquares / (double) kFftSize);
+    const float analysisFrameLevelDb = frameRms > 1.0e-8
+                                         ? (float) (20.0 * std::log10 (frameRms))
+                                         : -120.0f;
+
     // 1. 加窗 + FFT
     window.multiplyWithWindowingTable (analysisFrame.data(), kFftSize);
     std::copy (analysisFrame.begin(), analysisFrame.end(), fftBuffer.begin());
@@ -653,6 +855,10 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
     const float fftMagnitudeToDbfs = juce::Decibels::gainToDecibels (
         2.0f / (float) kFftSize,
         -120.0f);
+
+    // Onset analysis is intentionally independent of the slower display
+    // spectrum below and runs for every 512-sample FFT hop.
+    updateAutoOnsetDetector (analysisFrameLevelDb);
 
     // 2. 时间平滑：smoothedMagnitudes = 0.9 * old + 0.1 * new
     for (int bin = 0; bin < numBins; ++bin)
@@ -801,6 +1007,7 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
     };
 
     const float residualThreshold = useBassBoost ? 2.4f : 3.0f;
+    const float absolutePeakThresholdDbFs = peakDetectionThresholdDbFs.load();
     const float minHz = useBassBoost ? 28.0f : 40.0f;
     const float maxHz = 4000.0f;
 
@@ -840,6 +1047,10 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
     {
         const float hz = (float) bin * (float) currentSampleRate / (float) kFftSize;
         if (hz < minHz || hz > maxHz)
+            continue;
+
+        if (currentSpectrumDb[(size_t) bin] + fftMagnitudeToDbfs
+              < absolutePeakThresholdDbFs)
             continue;
 
         if (currentSpectrumDb[(size_t) bin] <= candidateMagnitudeFloorDb)
@@ -900,6 +1111,10 @@ void AudioPluginAudioProcessor::runFftAndFindPeaks()
         {
             const float fundamentalHz = (float) bin * (float) currentSampleRate / (float) kFftSize;
             const float fundamentalResidual = currentResidualDb[(size_t) bin];
+
+            if (currentSpectrumDb[(size_t) bin] + fftMagnitudeToDbfs
+                  < absolutePeakThresholdDbFs)
+                continue;
 
             if (currentSpectrumDb[(size_t) bin] <= bassCandidateMagnitudeFloorDb)
                 continue;
