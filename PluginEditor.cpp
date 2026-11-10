@@ -1126,12 +1126,28 @@ namespace
 
     int centroidToCc (float frequencyHz)
     {
-        constexpr float minFrequencyHz = 20.0f;
-        constexpr float maxFrequencyHz = 24000.0f;
+        // Keep MIDI export aligned with the range used by the descriptor UI.
+        constexpr float minFrequencyHz = 80.0f;
+        constexpr float maxFrequencyHz = 12000.0f;
         const float clampedHz = juce::jlimit (minFrequencyHz, maxFrequencyHz, frequencyHz);
         const float normalised = std::log (clampedHz / minFrequencyHz)
                                / std::log (maxFrequencyHz / minFrequencyHz);
         return normalisedDescriptorToCc (normalised);
+    }
+
+    int rmsToCc (float levelDb)
+    {
+        constexpr float minLevelDb = -96.0f;
+        constexpr float maxLevelDb = 0.0f;
+        const float normalised = (juce::jlimit (minLevelDb, maxLevelDb, levelDb) - minLevelDb)
+                               / (maxLevelDb - minLevelDb);
+        return normalisedDescriptorToCc (normalised);
+    }
+
+    int spreadToCc (float spreadHz)
+    {
+        constexpr float maxSpreadHz = 12000.0f;
+        return normalisedDescriptorToCc (spreadHz / maxSpreadHz);
     }
 
     void appendDescriptorEvents (juce::MidiMessageSequence& eventTrack,
@@ -1140,15 +1156,19 @@ namespace
     {
         constexpr int midiChannel = 1;
         constexpr int centroidCc = 20;
-        constexpr int flatnessCc = 21;
-        constexpr int roughnessCc = 22;
-        constexpr int stereoPanCc = 23;
+        constexpr int rmsCc = 21;
+        constexpr int fluxCc = 22;
+        constexpr int spreadCc = 23;
+        constexpr int flatnessCc = 24;
+        constexpr int stereoEnergyCc = 25;
         const double exportTimeScale = sanitiseMidiTimeScale (timeScale);
 
         int previousCentroid = -1;
+        int previousRms = -1;
+        int previousFlux = -1;
+        int previousSpread = -1;
         int previousFlatness = -1;
-        int previousRoughness = -1;
-        int previousPan = -1;
+        int previousStereoEnergy = -1;
 
         for (const auto& frame : frames)
         {
@@ -1156,13 +1176,33 @@ namespace
                               * exportTimeScale
                               * kMidiTicksPerQuarter;
             const int centroid = centroidToCc (frame.centroidHz);
+            const int rms = rmsToCc (frame.rmsDb);
+            const int flux = normalisedDescriptorToCc (frame.spectralFlux);
+            const int spread = spreadToCc (frame.spectralSpreadHz);
             const int flatness = normalisedDescriptorToCc (frame.spectralFlatness);
-            const int roughness = normalisedDescriptorToCc (frame.roughness);
 
             if (centroid != previousCentroid)
             {
                 eventTrack.addEvent (juce::MidiMessage::controllerEvent (midiChannel, centroidCc, centroid), tick);
                 previousCentroid = centroid;
+            }
+
+            if (rms != previousRms)
+            {
+                eventTrack.addEvent (juce::MidiMessage::controllerEvent (midiChannel, rmsCc, rms), tick);
+                previousRms = rms;
+            }
+
+            if (flux != previousFlux)
+            {
+                eventTrack.addEvent (juce::MidiMessage::controllerEvent (midiChannel, fluxCc, flux), tick);
+                previousFlux = flux;
+            }
+
+            if (spread != previousSpread)
+            {
+                eventTrack.addEvent (juce::MidiMessage::controllerEvent (midiChannel, spreadCc, spread), tick);
+                previousSpread = spread;
             }
 
             if (flatness != previousFlatness)
@@ -1171,19 +1211,16 @@ namespace
                 previousFlatness = flatness;
             }
 
-            if (roughness != previousRoughness)
-            {
-                eventTrack.addEvent (juce::MidiMessage::controllerEvent (midiChannel, roughnessCc, roughness), tick);
-                previousRoughness = roughness;
-            }
-
             if (frame.stereoPanAvailable)
             {
-                const int pan = normalisedDescriptorToCc (0.5f * (frame.stereoPanEnergy + 1.0f));
-                if (pan != previousPan)
+                const int stereoEnergy = normalisedDescriptorToCc (0.5f * (frame.stereoPanEnergy + 1.0f));
+                if (stereoEnergy != previousStereoEnergy)
                 {
-                    eventTrack.addEvent (juce::MidiMessage::controllerEvent (midiChannel, stereoPanCc, pan), tick);
-                    previousPan = pan;
+                    eventTrack.addEvent (juce::MidiMessage::controllerEvent (midiChannel,
+                                                                             stereoEnergyCc,
+                                                                             stereoEnergy),
+                                         tick);
+                    previousStereoEnergy = stereoEnergy;
                 }
             }
         }

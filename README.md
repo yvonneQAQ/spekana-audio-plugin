@@ -99,12 +99,14 @@ Frozen chords can be sent out in two ways:
 
 Quarter-tone mode uses per-note pitch bend on separate channels where needed.
 
-Completed Auto analysis can also export a combined MIDI file containing notes and four descriptor streams:
+Completed Auto analysis can also export a combined MIDI file containing notes and six descriptor streams:
 
 - CC20: spectral centroid
-- CC21: spectral flatness
-- CC22: roughness
-- CC23: stereo pan energy
+- CC21: RMS level
+- CC22: spectral flux
+- CC23: spectral spread
+- CC24: spectral flatness
+- CC25: stereo energy
 
 Before dragging or exporting combined MIDI, its complete timeline can be stretched to `*1`, `*2`, `*4`, `*5`, or `*10`. Notes, note lengths, pitch bends, and descriptor CC events remain aligned.
 
@@ -118,6 +120,8 @@ To use it:
 2. Choose a descriptor in each mapping chain.
 3. Press `Map`, then select a Live parameter.
 4. Adjust offset, depth, and the shared Rise/Fall smoothing controls as needed.
+
+Use this bridge with MIDI exported by the six-stream version of SPEKANA. For clips made with the earlier four-stream version, re-export them or play them through the matching older bridge. Check the saved mappings when replacing the device in an existing Live Set.
 
 The `.amxd` file can also be copied into Ableton's User Library under `Presets/MIDI Effects/Max MIDI Effect/`.
 
